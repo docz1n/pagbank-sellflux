@@ -1,15 +1,29 @@
 const express = require('express');
 const axios = require('axios');
+const crypto = require('crypto');
 require('dotenv').config();
 
 const app = express();
 app.use(express.json());
 
 const SELLFLUX_WEBHOOK = "https://webhook.sellflux.app/webhook/sellflux/lead/d800c6cf5d304e013ec4f95ab772d62e";
+const PAGBANK_PUBLIC_KEY = process.env.PAGBANK_PUBLIC_KEY;
+const PAGBANK_TOKEN = process.env.PAGBANK_TOKEN;
 
 // Endpoint para receber notificações do PagBank
 app.post('/webhook/pagbank', async (req, res) => {
     try {
+        // Verificar assinatura do webhook se existir
+        const signature = req.headers['x-signature'];
+        if (signature) {
+            const hmac = crypto.createHmac('sha256', PAGBANK_TOKEN);
+            const calculatedSignature = hmac.update(JSON.stringify(req.body)).digest('hex');
+            if (calculatedSignature !== signature) {
+                console.error('Assinatura inválida do webhook');
+                return res.status(401).send('Assinatura inválida');
+            }
+        }
+
         // Extrair dados do PagBank
         const {
             charges,
@@ -39,22 +53,6 @@ app.post('/webhook/pagbank', async (req, res) => {
                 sellfluxStatus = 'aguardando-pagamento';
         }
 
-        // Mapear método de pagamento
-        let paymentMethod;
-        switch(charge.payment_method.type) {
-            case 'CREDIT_CARD':
-                paymentMethod = 'cartao-credito';
-                break;
-            case 'PIX':
-                paymentMethod = 'pix';
-                break;
-            case 'BOLETO':
-                paymentMethod = 'boleto';
-                break;
-            default:
-                paymentMethod = charge.payment_method.type.toLowerCase();
-        }
-
         // Preparar dados para o Sellflux no formato correto
         const sellfluxData = {
             name: customer.name,
@@ -65,8 +63,8 @@ app.post('/webhook/pagbank', async (req, res) => {
             offer_id: items[0]?.reference_id || '',
             status: sellfluxStatus,
             payment_date: charge.paid_at || new Date().toISOString(),
+            payment_method: charge.payment_method.type.toLowerCase(),
             url: charge.payment_response_code || '',
-            payment_method: paymentMethod,
             expiration_date: charge.payment_method.boleto?.due_date || charge.payment_method.pix?.expiration_date || null,
             product_id: items[0]?.reference_id || '',
             product_name: items[0]?.name || '',
@@ -75,19 +73,25 @@ app.post('/webhook/pagbank', async (req, res) => {
         };
 
         // Enviar para o Sellflux
+        console.log('Enviando dados para Sellflux:', sellfluxData);
         const response = await axios.post(SELLFLUX_WEBHOOK, sellfluxData, {
             headers: {
                 'Content-Type': 'application/json'
             }
         });
 
-        console.log('Notificação enviada com sucesso para Sellflux:', reference_id);
+        console.log('Resposta do Sellflux:', response.data);
         return res.status(200).send('Webhook processado com sucesso');
 
     } catch (erro) {
         console.error('Erro ao processar webhook:', erro);
         return res.status(500).send('Erro ao processar webhook');
     }
+});
+
+// Health check endpoint
+app.get('/', (req, res) => {
+    res.send('Serviço de integração PagBank-Sellflux está ativo');
 });
 
 const PORT = process.env.PORT || 3000;
